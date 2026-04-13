@@ -1,3 +1,4 @@
+// Package config loads and validates the rivergate configuration file.
 package config
 
 import (
@@ -7,91 +8,65 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Source defines an input stream source.
+// Source defines an input source for log events.
 type Source struct {
 	Name string `yaml:"name"`
 	Type string `yaml:"type"`
-	Options map[string]string `yaml:"options"`
+	Addr string `yaml:"addr,omitempty"`
 }
 
-// Sink defines an output stream destination.
+// Sink defines an output destination for log events.
 type Sink struct {
 	Name string `yaml:"name"`
 	Type string `yaml:"type"`
-	Options map[string]string `yaml:"options"`
+	Addr string `yaml:"addr,omitempty"`
 }
 
-// Route maps a source to one or more sinks with optional filters.
+// Route maps a source to one or more sinks.
 type Route struct {
-	From string `yaml:"from"`
-	To []string `yaml:"to"`
-	Filter string `yaml:"filter,omitempty"`
+	From string   `yaml:"from"`
+	To   []string `yaml:"to"`
 }
 
-// Config is the top-level rivergate configuration.
+// Config is the top-level configuration structure.
 type Config struct {
 	Sources []Source `yaml:"sources"`
-	Sinks []Sink `yaml:"sinks"`
-	Routes []Route `yaml:"routes"`
+	Sinks   []Sink   `yaml:"sinks"`
+	Routes  []Route  `yaml:"routes"`
 }
 
-// Load reads and parses a YAML config file from the given path.
+// Load reads and validates the configuration from the given file path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: reading file %q: %w", path, err)
+		return nil, fmt.Errorf("config: read file: %w", err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("config: parsing yaml: %w", err)
+		return nil, fmt.Errorf("config: parse yaml: %w", err)
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("config: validation failed: %w", err)
+	if err := validate(&cfg); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
 }
 
-// Validate checks that the config is semantically valid.
-func (c *Config) Validate() error {
-	sourceNames := make(map[string]struct{}, len(c.Sources))
-	for _, s := range c.Sources {
-		if s.Name == "" {
-			return fmt.Errorf("source missing required field 'name'")
-		}
-		if s.Type == "" {
-			return fmt.Errorf("source %q missing required field 'type'", s.Name)
-		}
+// validate performs semantic validation of the loaded configuration.
+func validate(cfg *Config) error {
+	sourceNames := make(map[string]struct{}, len(cfg.Sources))
+	for _, s := range cfg.Sources {
 		sourceNames[s.Name] = struct{}{}
 	}
 
-	sinkNames := make(map[string]struct{}, len(c.Sinks))
-	for _, s := range c.Sinks {
-		if s.Name == "" {
-			return fmt.Errorf("sink missing required field 'name'")
+	for i, route := range cfg.Routes {
+		if _, ok := sourceNames[route.From]; !ok {
+			return fmt.Errorf("config: route[%d]: unknown source %q", i, route.From)
 		}
-		if s.Type == "" {
-			return fmt.Errorf("sink %q missing required field 'type'", s.Name)
-		}
-		sinkNames[s.Name] = struct{}{}
-	}
-
-	for i, r := range c.Routes {
-		if r.From == "" {
-			return fmt.Errorf("route[%d] missing required field 'from'", i)
-		}
-		if _, ok := sourceNames[r.From]; !ok {
-			return fmt.Errorf("route[%d] references unknown source %q", i, r.From)
-		}
-		if len(r.To) == 0 {
-			return fmt.Errorf("route[%d] must have at least one sink in 'to'", i)
-		}
-		for _, sink := range r.To {
-			if _, ok := sinkNames[sink]; !ok {
-				return fmt.Errorf("route[%d] references unknown sink %q", i, sink)
-			}
+		if len(route.To) == 0 {
+			return fmt.Errorf("config: route[%d]: 'to' must have at least one sink", i)
 		}
 	}
 
