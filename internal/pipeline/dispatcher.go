@@ -1,38 +1,77 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 )
 
-// Dispatcher routes events from the router to the appropriate sinks.
+// Dispatcher wires sources through processors to sinks using a Router,
+// and records per-event metrics.
 type Dispatcher struct {
-	router *Router
-	sinks  *SinkRegistry
+	router    *Router
+	processor *ProcessorChain
+	sinks     *SinkRegistry
+	metrics   *Metrics
 }
 
-// NewDispatcher creates a Dispatcher wiring a Router to a SinkRegistry.
-func NewDispatcher(router *Router, sinks *SinkRegistry) *Dispatcher {
-	return &Dispatcher{router: router, sinks: sinks}
+// NewDispatcher creates a Dispatcher from the provided components.
+func NewDispatcher(router *Router, processor *ProcessorChain, sinks *SinkRegistry, metrics *Metrics) *Dispatcher {
+	return &Dispatcher{
+		router:    router,
+		processor: processor,
+		sinks:     sinks,
+		metrics:   metrics,
+	}
 }
 
-// Dispatch routes the event and writes it to all resolved sinks.
-// Returns the number of sinks written to, or an error if any write fails.
-func (d *Dispatcher) Dispatch(event *Event) (int, error) {
-	sinkNames := d.router.Route(event)
+// Dispatch reads events from the named source, routes them, applies the
+// processor chain, and writes to the resolved sinks until ctx is done.
+func (d *Dispatcher) Dispatch(ctx context.Context, source Source) error {
+	ch := make(chan *Event, 64)
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- source.Start(ctx, ch)
+	}()
+
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return <-errCh
+			}
+			d.metrics.Inc("events_received")
+			if err := d.handle(ev, source.Name()); err != nil {
+				d.metrics.Inc("events_errored")
+			}
+		case <-ctx.Done():
+			return <-errCh
+		}
+	}
+}
+
+func (d *Dispatcher) handle(ev *Event, sourceName string) error {
+	sinkNames := d.router.Route(sourceName)
 	if len(sinkNames) == 0 {
-		return 0, nil
+		d.metrics.Inc("events_dropped")
+		return nil
 	}
 
-	written := 0
-	for _, name := range sinkNames {
-		sink, ok := d.sinks.Get(name)
-		if !ok {
-			return written, fmt.Errorf("dispatcher: sink %q not found", name)
-		}
-		if err := sink.Write(event); err != nil {
-			return written, fmt.Errorf("dispatcher: sink %q write error: %w", name, err)
-		}
-		written++
+	out := d.processor.Run(ev)
+	if out == nil {
+		d.metrics.Inc("events_filtered")
+		return nil
 	}
-	return written, nil
+
+	for _, name := range sinkNames {
+		sink, err := d.sinks.Get(name)
+		if err != nil {
+			return fmt.Errorf("dispatcher: sink %q not found: %w", name, err)
+		}
+		if err := sink.Write(out); err != nil {
+			return fmt.Errorf("dispatcher: sink %q write error: %w", name, err)
+		}
+		d.metrics.Inc("events_written")
+	}
+	return nil
 }
