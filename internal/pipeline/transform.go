@@ -1,72 +1,70 @@
 package pipeline
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
-// TransformFunc is a function that mutates a cloned Event.
-type TransformFunc func(e *Event) error
+// TransformOp is a function that mutates an Event in place.
+type TransformOp func(*Event)
 
-// Transformer applies an ordered list of TransformFuncs to events.
+// Transformer holds an ordered list of transform operations.
 type Transformer struct {
-	steps []TransformFunc
+	ops []TransformOp
 }
 
-// NewTransformer creates a Transformer with the given steps.
-func NewTransformer(steps ...TransformFunc) *Transformer {
-	return &Transformer{steps: steps}
-}
-
-// Apply clones the event, runs every step in order, and returns the result.
-// The original event is never modified. Returns an error if any step fails.
-func (t *Transformer) Apply(e *Event) (*Event, error) {
-	out := e.Clone()
-	for i, step := range t.steps {
-		if err := step(out); err != nil {
-			return nil, fmt.Errorf("transform step %d: %w", i, err)
+// NewTransformer builds a Transformer from a slice of config maps.
+// Each map must contain at least "type" and "field" keys.
+func NewTransformer(cfg []map[string]string) (*Transformer, error) {
+	ops := make([]TransformOp, 0, len(cfg))
+	for _, entry := range cfg {
+		kind := entry["type"]
+		field := entry["field"]
+		switch kind {
+		case "set":
+			value := entry["value"]
+			ops = append(ops, SetField(field, value))
+		case "delete":
+			ops = append(ops, DeleteField(field))
+		case "rename":
+			to := entry["to"]
+			ops = append(ops, RenameField(field, to))
+		default:
+			return nil, fmt.Errorf("transform: unknown type %q", kind)
 		}
 	}
-	return out, nil
+	return &Transformer{ops: ops}, nil
 }
 
-// --- built-in transform helpers ---
+// Apply runs all transform operations against the given event.
+func (t *Transformer) Apply(e *Event) {
+	for _, op := range t.ops {
+		op(e)
+	}
+}
 
-// SetField returns a TransformFunc that sets a fixed field value.
-func SetField(key string, value any) TransformFunc {
-	return func(e *Event) error {
+// SetField returns a TransformOp that sets key to value on the event.
+func SetField(key, value string) TransformOp {
+	return func(e *Event) {
 		e.Set(key, value)
-		return nil
 	}
 }
 
-// DeleteField returns a TransformFunc that removes a field from the event.
-func DeleteField(key string) TransformFunc {
-	return func(e *Event) error {
-		delete(e.Fields, key)
-		return nil
-	}
-}
-
-// RenameField returns a TransformFunc that renames a field, preserving its value.
-func RenameField(from, to string) TransformFunc {
-	return func(e *Event) error {
-		if v, ok := e.Get(from); ok {
-			e.Set(to, v)
-			delete(e.Fields, from)
+// DeleteField returns a TransformOp that removes key from the event.
+func DeleteField(key string) TransformOp {
+	return func(e *Event) {
+		if e.Fields != nil {
+			delete(e.Fields, key)
 		}
-		return nil
 	}
 }
 
-// UppercaseField returns a TransformFunc that upper-cases a string field value.
-func UppercaseField(key string) TransformFunc {
-	return func(e *Event) error {
-		if v, ok := e.Get(key); ok {
-			if s, ok := v.(string); ok {
-				e.Set(key, strings.ToUpper(s))
-			}
+// RenameField returns a TransformOp that moves the value at oldKey to newKey.
+func RenameField(oldKey, newKey string) TransformOp {
+	return func(e *Event) {
+		if e.Fields == nil {
+			return
 		}
-		return nil
+		if v, ok := e.Fields[oldKey]; ok {
+			e.Fields[newKey] = v
+			delete(e.Fields, oldKey)
+		}
 	}
 }
