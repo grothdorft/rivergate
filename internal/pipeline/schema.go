@@ -38,6 +38,9 @@ func NewSchema(fields []FieldSchema) (*Schema, error) {
 		if f.Type != FieldTypeString && f.Type != FieldTypeNumber && f.Type != FieldTypeBool {
 			return nil, fmt.Errorf("schema field %q has unknown type %q", f.Name, f.Type)
 		}
+		if f.Pattern != nil && f.Type != FieldTypeString {
+			return nil, fmt.Errorf("schema field %q has a pattern but type is %q, pattern is only valid for string fields", f.Name, f.Type)
+		}
 		m[f.Name] = f
 	}
 	return &Schema{fields: m}, nil
