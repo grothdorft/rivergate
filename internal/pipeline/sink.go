@@ -79,3 +79,17 @@ func (r *SinkRegistry) Get(name string) (Sink, bool) {
 	s, ok := r.sinks[name]
 	return s, ok
 }
+
+// CloseAll closes every sink in the registry and returns the first error
+// encountered. All sinks are attempted regardless of individual failures.
+func (r *SinkRegistry) CloseAll() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var firstErr error
+	for name, sink := range r.sinks {
+		if err := sink.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("closing sink %q: %w", name, err)
+		}
+	}
+	return firstErr
+}
